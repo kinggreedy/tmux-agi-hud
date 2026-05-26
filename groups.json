@@ -1,0 +1,47 @@
+{
+  "colors": {
+    "healthy": ["#00ff00", "#004c00"],
+    "medium": ["#ffb400", "#4c3600"],
+    "low": ["#ff7070", "#4c2121"],
+    "critical": ["#ff3030", "#4c0e0e"],
+    "recovery": ["#808080", "#303030"],
+    "coin": "#ffb400"
+  },
+  "show_reload_timer": true,
+  "agy": {
+    "GEMINI": [
+      "Gemini 3.1 Pro (High)",
+      "Gemini 3.1 Pro (Low)",
+      "Gemini 3.5 Flash (High)",
+      "Gemini 3.5 Flash (Low)",
+      "Gemini 3.5 Flash (Medium)"
+    ],
+    "OTHER": [
+      "Claude Opus 4.6 (Thinking)",
+      "Claude Sonnet 4.6 (Thinking)",
+      "GPT-OSS 120B (Medium)"
+    ]
+  },
+  "gemini": {
+    "FLASH": [
+      "gemini-2.5-flash",
+      "gemini-3-flash-preview"
+    ],
+    "LITE": [
+      "gemini-2.5-flash-lite",
+      "gemini-3.1-flash-lite",
+      "gemini-3.1-flash-lite-preview"
+    ],
+    "PRO": [
+      "gemini-2.5-pro",
+      "gemini-3-pro-preview",
+      "gemini-3.1-pro-preview"
+    ]
+  },
+  "codex": {
+    "Limits": [
+      "primary",
+      "secondary"
+    ]
+  }
+}
