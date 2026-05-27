@@ -2,6 +2,7 @@ import json
 import os
 import re
 import urllib.request
+import urllib.parse
 import ssl
 import sys
 import socket
@@ -40,6 +41,7 @@ cache = {
     "agy_next": 0,
     "gemini_data": None,
     "gemini_next": 0,
+    "gemini_mtime": 0,
     "codex_data": None,
     "codex_next": 0,
     "codex_file": None,
@@ -93,15 +95,14 @@ def get_adaptive_sleep(pct, remaining_secs):
         if remaining_secs > 14400: return 3600 # > 4h -> 1h poll
         if remaining_secs > 7200: return 900   # > 2h -> 15m poll
         if remaining_secs > 1800: return 300   # > 30m -> 5m poll
-        if remaining_secs > 300: return 60     # > 5m -> 1m poll
-        return 20                             # < 5m -> 20s poll
+        return 60                             # Min poll 1m
     if pct >= 40: return 300  # Healthy/Medium -> 5m poll
     if pct >= 20: return 120  # Low -> 2m poll
     return 60                 # Critical -> 1m poll
 
 def generate_bar(pct, groups_cfg, time_remaining_secs=None, window_mins=None, length=5):
     colors = groups_cfg.get("colors", {})
-    
+
     # Special case: 0% Recovery Bar (Grey, fills as time passes)
     if pct == 0 and time_remaining_secs is not None and window_mins is not None:
         window_secs = window_mins * 60
@@ -121,7 +122,7 @@ def generate_bar(pct, groups_cfg, time_remaining_secs=None, window_mins=None, le
         fg, bg = colors.get("low", ["#ff7070", "#4c2121"])
     else:
         fg, bg = colors.get("critical", ["#ff3030", "#4c0e0e"])
-    
+
     return fmt("█" * filled, fg=fg) + fmt("█" * (length - filled), fg=bg)
 
 def get_agy_ports():
@@ -164,7 +165,9 @@ def fetch_agy_status():
 def fetch_gemini_quota():
     if not os.path.exists(gemini_creds): return None
     try:
-        with open(gemini_creds) as f: creds = json.load(f)
+        with open(gemini_creds, "r") as f: creds = json.load(f)
+        expiry = creds.get("expiry_date", 0) / 1000.0
+        if time.time() > expiry: return None
         token = creds.get("access_token")
         if not token: return None
         url = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
@@ -219,9 +222,8 @@ def generate_output(groups_cfg):
         data = fetch_agy_status()
         if data:
             cache["agy_data"] = data
-            u_status = data.get("userStatus", {})
-            config_key = "cascadeModelConfigData" if "cascadeModelConfigData" in u_status else "serverConfig"
-            client_configs = u_status.get(config_key, {}).get("clientModelConfigs", [])
+            u = data.get("userStatus", {})
+            client_configs = u.get("cascadeModelConfigData", u.get("serverConfig", {})).get("clientModelConfigs", [])
             min_p, min_r = 100, 999999
             for cfg in client_configs:
                 q = cfg.get("quotaInfo", {})
@@ -236,30 +238,25 @@ def generate_output(groups_cfg):
 
     if cache["agy_data"]:
         status = cache["agy_data"]
-        u_status = status.get("userStatus", {})
-        plan_status = u_status.get("planStatus", {})
-        credits = plan_status.get("availablePromptCredits")
-        config_key = "cascadeModelConfigData" if "cascadeModelConfigData" in u_status else "serverConfig"
-        client_configs = u_status.get(config_key, {}).get("clientModelConfigs", [])
-        model_data = {cfg.get("label"): cfg.get("quotaInfo", {}) for cfg in client_configs if cfg.get("label")}
+        u = status.get("userStatus", {})
+        credits = u.get("planStatus", {}).get("availablePromptCredits")
+        model_data = {cfg.get("label"): cfg.get("quotaInfo", {}) for cfg in u.get("cascadeModelConfigData", u.get("serverConfig", {})).get("clientModelConfigs", []) if cfg.get("label")}
         agy_groups = groups_cfg.get("agy", {})
-        known_models = set()
-        for g_models in agy_groups.values(): known_models.update(g_models)
-        has_unknown = any(m not in known_models for m in model_data.keys())
-        has_inconsistency = False
+        known = set()
+        for g in agy_groups.values(): known.update(g)
+        unknown = any(m not in known for m in model_data.keys())
+        has_inc = False
         results = []
-        if credits is not None:
-            c_color = colors.get("coin", "#ffb400")
-            results.append(fmt(f"◉:{credits}", fg=c_color))
+        if credits is not None: results.append(fmt(f"◉:{credits}", fg=colors.get("coin", "#ffb400")))
         for g_name, g_models in agy_groups.items():
-            present_data = [(m, model_data[m]) for m in g_models if m in model_data]
-            if not present_data: continue
+            present = [(m, model_data[m]) for m in g_models if m in model_data]
+            if not present: continue
             stats = []
-            for m, q in present_data:
+            for m, q in present:
                 fraction = q.get("remainingFraction")
                 pct = int(fraction * 100) if fraction is not None else (0 if q.get("resetTime") else 100)
                 stats.append((pct, q.get("resetTime")))
-            if len(set(stats)) > 1: has_inconsistency = True
+            if len(set(stats)) > 1: has_inc = True
             avg_pct = stats[0][0]
             all_pcts.append(avg_pct)
             reset_txt, delta = "", None
@@ -267,21 +264,27 @@ def generate_output(groups_cfg):
                 resets = [s[1] for s in stats if s[1]]
                 if resets:
                     try:
-                        dt = datetime.fromisoformat(resets[0].replace("Z", "+00:00"))
-                        delta = (dt - datetime.now(timezone.utc)).total_seconds()
-                        if delta > 0: reset_txt = f" {format_duration(delta)}⌛"
-                        else: delta = None
+                        rem = (datetime.fromisoformat(resets[0].replace("Z", "+00:00")) - datetime.now(timezone.utc)).total_seconds()
+                        if rem > 0: reset_txt, delta = f" {format_duration(rem)}⌛", rem
                     except: pass
             bar = generate_bar(avg_pct, groups_cfg, delta, WINDOW_SIZES["AGY"])
-            results.append(f"{g_name} {bar} {fmt(f'{avg_pct}%', bold=True)}{fmt(reset_txt, fg='#808080')}")
-        u_tag = fmt(" U!", fg="#ff5050") if (has_unknown or has_inconsistency) else ""
-        reload_t = ""
-        if groups_cfg.get("show_reload_timer", True):
-            reload_t = fmt(f" {format_reload_timer(cache['agy_next'] - now)}", fg="#ff3030")
+            pct_label = f"{avg_pct}%" if avg_pct > 0 else "⚡"
+            results.append(f"{g_name} {bar} {fmt(pct_label, bold=True)}{fmt(reset_txt, fg='#808080')}")
+        u_tag = fmt(" U!", fg="#ff5050") if (unknown or has_inc) else ""
+        reload_t = fmt(f" {format_reload_timer(cache['agy_next'] - now)}", fg="#ff3030") if groups_cfg.get("show_reload_timer", True) else ""
         lines["AGY"] = f"{' '.join(results)}{u_tag}{reload_t}".strip()
     else: lines["AGY"] = f"{fmt('OFF', fg='#808080')}"
 
     # --- GEMINI SECTION ---
+    creds_mtime = 0
+    try: creds_mtime = os.path.getmtime(gemini_creds)
+    except: pass
+
+    # If file changed, force a re-poll
+    if creds_mtime > cache["gemini_mtime"]:
+        cache["gemini_next"] = 0
+        cache["gemini_mtime"] = creds_mtime
+
     if now > cache["gemini_next"]:
         data = fetch_gemini_quota()
         if data:
@@ -300,19 +303,19 @@ def generate_output(groups_cfg):
     if cache["gemini_data"]:
         buckets = {b.get("modelId"): b for b in cache["gemini_data"]["buckets"] if b.get("modelId")}
         g_groups = groups_cfg.get("gemini", {})
-        known_buckets = set()
-        for g_buckets in g_groups.values(): known_buckets.update(g_buckets)
-        has_unknown = any(bid not in known_buckets for bid in buckets.keys())
-        has_inconsistency = False
+        known = set()
+        for g in g_groups.values(): known.update(g)
+        unknown = any(bid not in known for bid in buckets.keys())
+        has_inc = False
         results = []
         for g_name, g_ids in g_groups.items():
-            present_data = [(bid, buckets[bid]) for bid in g_ids if bid in buckets]
-            if not present_data: continue
+            present = [(bid, buckets[bid]) for bid in g_ids if bid in buckets]
+            if not present: continue
             stats = []
-            for bid, b in present_data:
+            for bid, b in present:
                 pct = int(b.get("remainingFraction", 1.0) * 100)
                 stats.append((pct, b.get("resetTime")))
-            if len(set(stats)) > 1: has_inconsistency = True
+            if len(set(stats)) > 1: has_inc = True
             avg_pct = stats[0][0]
             all_pcts.append(avg_pct)
             reset_txt, delta = "", None
@@ -320,17 +323,14 @@ def generate_output(groups_cfg):
                 resets = [s[1] for s in stats if s[1]]
                 if resets:
                     try:
-                        dt = datetime.fromisoformat(resets[0].replace("Z", "+00:00"))
-                        delta = (dt - datetime.now(timezone.utc)).total_seconds()
-                        if delta > 0: reset_txt = f" {format_duration(delta)}⌛"
-                        else: delta = None
+                        rem = (datetime.fromisoformat(resets[0].replace("Z", "+00:00")) - datetime.now(timezone.utc)).total_seconds()
+                        if rem > 0: reset_txt, delta = f" {format_duration(rem)}⌛", rem
                     except: pass
             bar = generate_bar(avg_pct, groups_cfg, delta, WINDOW_SIZES["GEM"])
-            results.append(f"{g_name} {bar} {fmt(f'{avg_pct}%', bold=True)}{fmt(reset_txt, fg='#808080')}")
-        u_tag = fmt(" U!", fg="#ff5050") if (has_unknown or has_inconsistency) else ""
-        reload_t = ""
-        if groups_cfg.get("show_reload_timer", True):
-            reload_t = fmt(f" {format_reload_timer(cache['gemini_next'] - now)}", fg="#ff3030")
+            pct_label = f"{avg_pct}%" if avg_pct > 0 else "⚡"
+            results.append(f"{g_name} {bar} {fmt(pct_label, bold=True)}{fmt(reset_txt, fg='#808080')}")
+        u_tag = fmt(" U!", fg="#ff5050") if (unknown or has_inc) else ""
+        reload_t = fmt(f" {format_reload_timer(cache['gemini_next'] - now)}", fg="#ff3030") if groups_cfg.get("show_reload_timer", True) else ""
         lines["GEM"] = f"{' '.join(results)}{u_tag}{reload_t}".strip()
     else: lines["GEM"] = f"{fmt('OFF', fg='#808080')}"
 
@@ -342,8 +342,7 @@ def generate_output(groups_cfg):
             p = data.get("primary", {})
             left = 100 - p.get("used_percent", 0)
             res = p.get("resets_at", 0)
-            rem = max(0, res - now)
-            cache["codex_next"] = now + get_adaptive_sleep(left, rem)
+            cache["codex_next"] = now + get_adaptive_sleep(left, max(0, res - now))
         else: cache["codex_next"] = now + 300
 
     if cache["codex_data"]:
@@ -361,10 +360,9 @@ def generate_output(groups_cfg):
                     reset_txt = f" {format_duration(delta)}⌛"
                 win = WINDOW_SIZES["CDX_5H"] if key == "primary" else WINDOW_SIZES["CDX_WK"]
                 bar = generate_bar(left_pct, groups_cfg, delta, win)
-                results.append(f"{label} {bar} {fmt(f'{left_pct}%', bold=True)}{fmt(reset_txt, fg='#808080')}")
-        reload_t = ""
-        if groups_cfg.get("show_reload_timer", True):
-            reload_t = fmt(f" {format_reload_timer(cache['codex_next'] - now)}", fg="#ff3030")
+                pct_label = f"{left_pct}%" if left_pct > 0 else "⚡"
+                results.append(f"{label} {bar} {fmt(pct_label, bold=True)}{fmt(reset_txt, fg='#808080')}")
+        reload_t = fmt(f" {format_reload_timer(cache['codex_next'] - now)}", fg="#ff3030") if groups_cfg.get("show_reload_timer", True) else ""
         lines["CDX"] = f"{' '.join(results)}{reload_t}"
     else: lines["CDX"] = f"{fmt('OFF', fg='#808080')}"
 
@@ -388,7 +386,7 @@ def main():
             elif "GEMINI" in session_name or "GEM" in session_name: selection = "GEM"
             elif "CODEX" in session_name or "CDX" in session_name: selection = "CDX"
         except: pass
-    
+
     if not is_daemon:
         lines = generate_output(groups_cfg)
         if selection and selection in lines: print(lines[selection])
@@ -402,7 +400,7 @@ def main():
                 for key, content in lines.items():
                     if content: update_tmux_vars(key, content)
                 ordered = [("1", lines["AGY"]), ("2", lines["GEM"]), ("3", lines["CDX"])]
-                if selection and selection in lines: 
+                if selection and selection in lines:
                     update_tmux_vars("1", lines[selection])
                 else:
                     for idx, content in ordered:

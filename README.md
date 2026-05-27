@@ -1,116 +1,95 @@
 # Tmux AGI-CLI Resource Quota Monitor
 
-A lightweight tmux status monitor for AI CLI tools: Antigravity (AGY), Gemini CLI (GEM), and Codex CLI (CDX) quota tracking - inspired by RPG-style HP bars, because these things drain faster than stamina in a boss fight.
+A lightweight, high-performance tmux status monitor for AI CLI tools: Antigravity (AGY), Gemini CLI (GEM), and Codex CLI (CDX). Inspired by RPG-style HP bars to help you track your "mana" across different models, because these things drain faster than stamina in a boss fight.
 
 ## Features
 
 * **Adaptive Polling**
   API refresh intervals adapt dynamically based on quota level and reset proximity, from 1m to 1h.
 
-* **Visual Progress Bars**
+* **RPG-Style Visual Bars with Minimalist Design**
   5-segment color-coded bars representing quota health (Green / Orange / Red).
-
-* **0% Recovery Mode**
-  Empty quotas switch to grey recovery bars that refill as reset time approaches.
+  Empty quotas switch to a grey progress bar that fills up as the reset time approaches.
+  Ultra-clean, space-efficient output with icons (`◉`, `⌛`, `↻`) and high-density data.
 
 * **Session-Aware UI**
-  The status line automatically changes based on the active tmux session name (`agy`, `gemini`, `codex`).
+  Automatically displays only the relevant agent status based on the active tmux session name (`agy`, `gemini`, `codex`).
+
+* **Robust Daemon + Watchdog**
+  Background worker with timestamp-based stale-data cleanup via a watchdog script.
 
 * **Independent API Scheduling**
   AGY, GEM, and CDX refresh independently to avoid unnecessary polling.
 
-* **Robust Daemon + Watchdog**
-  Background worker with timestamp-based stale-data cleanup.
-
 ## File Structure
 
 * `tmux_status.py` — Main daemon and status renderer.
-* `groups.json` — Model grouping and display configuration.
-* `resource_watchdog.sh` — Clears stale tmux variables if the daemon stops updating.
-* `tools\debug_status.py` — Debug utility for inspecting AGY responses.
-* `tools\test_colors.py` — Verifies TrueColor terminal rendering.
+* `groups.json` — Central configuration for model grouping, colors, and display toggles.
+* `resource_watchdog.sh` — Clears stale tmux variables if the daemon stops.
+* `tools/debug_status.py` — Utility for inspecting raw API quota responses from the CLI tools.
+* `tools/test_colors.py` — Visual test suite to verify terminal color rendering and UI phases.
 
 ## Setup
 
 ### 1. Configure Model Groups
 
-Edit `groups.json` to define display groups such as:
+Edit `groups.json` to customize your theme or model groupings:
 
 ```json
 {
-  "FLASH": [...],
-  "PRO": [...]
+  "colors": {
+    "healthy": ["#00ff00", "#004c00"],
+    ...
+    "coin": "#ffb400"
+  },
+  "show_reload_timer": true,
+  "session-name": {
+    "GROUP-NAME": [
+      model1, model2, ...
+    ]
+  }
 }
 ```
 
-Optional:
+### 2. Tmux Integration
 
-```json
-"show_reload_timer": true
-```
-
-## Tmux Integration
-
-Add to `~/.tmux.conf`:
+Add the following to your `~/.tmux.conf`:
 
 ```tmux
-# Background quota daemon
+# Start the background quota daemon
 run-shell -b 'python3 ~/tmux-agi-hud/tmux_status.py --tmux --daemon'
 
-# Watchdog cleanup
+# Start the watchdog cleanup
 run-shell -b 'while true; do ~/tmux-agi-hud/resource_watchdog.sh; sleep 60; done'
 
 # Session-aware status display
 set -g status-right "#{@resource_status}#{?#{==:#S,agy}, #{@resource_status_AGY},}#{?#{==:#S,gemini}, #{@resource_status_GEM},}#{?#{==:#S,codex}, #{@resource_status_CDX},}"
-
 set -g status-interval 5
 ```
 
 ## Usage
 
-Session names determine which quota group is shown:
+The system automatically detects your tmux session name to filter the display:
 
-| Session  | Status       |
-| -------- | ------------ |
-| `agy`    | AGY quota    |
-| `gemini` | Gemini quota |
-| `codex`  | Codex quota  |
+| Session Name Contains | Displayed Status |
+| --------------------- | ---------------- |
+| `AGY`                 | Antigravity      |
+| `GEMINI` / `GEM`      | Gemini CLI       |
+| `CODEX` / `CDX`       | Codex CLI        |
 
-Show all statuses manually:
-
-```bash
-python3 tmux_status.py
-```
-
-Force a specific provider:
-
-```bash
-python3 tmux_status.py --filter=AGY
-```
-
-## Reloading
-
-After modifying the Python worker:
-
-```bash
-pkill -f tmux_status.py
-tmux source-file ~/.tmux.conf
-```
+**Manual Commands:**
+- Show all statuses: `python3 tmux_status.py`
+- Force a specific agent: `python3 tmux_status.py --filter=GEM`
 
 ## Troubleshooting
 
-| Indicator      | Meaning                                 |
-| -------------- | --------------------------------------- |
-| `U!`           | Unknown model or group inconsistency    |
-| `OFF`          | API/service unavailable                 |
-| `ERR ...`      | Worker exception                        |
-| Missing status | Watchdog likely cleared stale variables |
-
-Verify terminal TrueColor support:
-
-```bash
-python3 test_colors.py
-```
+| Indicator | Meaning                                 |
+| --------- | --------------------------------------- |
+| `⚡`      | Charging mode (Quota is 0%, bar filling) |
+| `U!`      | Unknown model or internal inconsistency |
+| `OFF`     | API/service unavailable                 |
+| `ERR ...` | Background worker exception             |
+| `0s-1h`   | (Red text) Time until next API poll     |
 
 ## Note
 
@@ -121,4 +100,4 @@ python3 test_colors.py
 - Claude support is planned later. I do not currently have Claude access, but PRs are welcome.
 - A proper PID/lockfile system should eventually be added to prevent duplicate daemon workers after repeated tmux reloads.
 - Assumes tmux with TrueColor support (`tmux-256color` recommended).
-- Some local API endpoints used by AGY are unofficial/internal and may change over time.
+- Some local API endpoints are unofficial/internal and may change over time.
